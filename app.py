@@ -5,6 +5,7 @@ import tempfile
 from google import generativeai
 import random
 import io
+from pydantic import BaseModel
 
 # Initialize FastAPI app
 app = FastAPI(title="Hen Feces Chatbot API")
@@ -18,10 +19,17 @@ API_KEYS = [
 # Store conversation history
 conversation_history = []
 
-def chat_with_vet(user_message: str, user_reply: str, image: Image.Image):
+# Request model for chat input
+class ChatRequest(BaseModel):
+    user_message: str = ""
+    user_reply: str = ""
+    lang: str = "english"  # Default to English
+
+def chat_with_vet(user_message: str, user_reply: str, image: Image.Image, lang: str):
     try:
         if not isinstance(image, Image.Image):
-            return {"error": "Please upload a valid image of hen feces."}
+            error_msg = "Please upload a valid image of hen feces." if lang == "english" else "Da fatan za a loda hoton kaza mai inganci."
+            return {"error": error_msg}
 
         # Save image
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
@@ -40,8 +48,8 @@ def chat_with_vet(user_message: str, user_reply: str, image: Image.Image):
 
         # Build conversation sequence
         prompt = (
-            "You are an intelligent veterinary chatbot specializing in poultry. An image of hen feces is uploaded. Analyze the image and user inputs to diagnose potential diseases and predict appropriate medications. "
-            "Provide brief, clear responses in a natural, conversational tone. If more information is needed, ask one concise, relevant follow-up question at a time, up to a maximum of three. Do not mention or list future questions. If sufficient information is gathered before three questions, provide a concise prediction listing only the likely disease(s) and specific medication(s). "
+            f"You are an intelligent veterinary chatbot specializing in poultry. An image of hen feces is uploaded. Analyze the image and user inputs to diagnose potential diseases and predict appropriate medications. "
+            f"Provide brief, clear responses in a natural, conversational tone in {lang} ('english' or 'hausa'). If more information is needed, ask one concise, relevant follow-up question at a time, up to a maximum of three. Do not mention or list future questions. If sufficient information is gathered before three questions, provide a concise prediction listing only the likely disease(s) and specific medication(s) in {lang}. "
             "Note: Not all hens are layers."
         )
         
@@ -62,39 +70,60 @@ def chat_with_vet(user_message: str, user_reply: str, image: Image.Image):
         return {"response": response.text}
 
     except Exception as e:
-        return {"error": f"Error: {str(e)}"}
+        error_msg = f"Error: {str(e)}" if lang == "english" else f"Kuskure: {str(e)}"
+        return {"error": error_msg}
 
-def clear_conversation():
+def clear_conversation(lang: str):
     """Clear the conversation history and return a confirmation message."""
     conversation_history.clear()
-    return {"response": "Conversation history cleared. Ready for a new case."}
+    message = "Conversation history cleared. Ready for a new case." if lang == "english" else "An share tarihin tattaunawa. A shirye don sabon shari'a."
+    return {"response": message}
 
 # API endpoint for chatting with the vet
 @app.post("/chat")
 async def chat_endpoint(
     image: UploadFile = File(...),
     user_message: str = Form(default=""),
-    user_reply: str = Form(default="")
+    user_reply: str = Form(default=""),
+    lang: str = Form(default="english")
 ):
     try:
+        # Validate language
+        if lang.lower() not in ["english", "hausa"]:
+            error_msg = "Invalid language. Use 'english' or 'hausa'." if lang.lower() == "english" else "Harshen da ba daidai ba. Yi amfani da 'english' ko 'hausa'."
+            raise HTTPException(status_code=400, detail=error_msg)
+
         # Read and validate image
         image_data = await image.read()
         image = Image.open(io.BytesIO(image_data))
         if image.format not in ["JPEG", "PNG"]:
-            raise HTTPException(status_code=400, detail="Only JPEG or PNG images are supported.")
+            error_msg = "Only JPEG or PNG images are supported." if lang.lower() == "english" else "Hotunan JPEG ko PNG kawai ake tallafawa."
+            raise HTTPException(status_code=400, detail=error_msg)
 
         # Call chat_with_vet function
-        result = chat_with_vet(user_message, user_reply, image)
+        result = chat_with_vet(user_message, user_reply, image, lang.lower())
         return result
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+        error_msg = f"Error processing request: {str(e)}" if lang.lower() == "english" else f"Kuskure wajen sarrafa buƙata: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_msg)
 
 # API endpoint for clearing conversation history
 @app.post("/clear")
-async def clear_endpoint():
-    result = clear_conversation()
+async def clear_endpoint(lang: str = Form(default="english")):
+    if lang.lower() not in ["english", "hausa"]:
+        error_msg = "Invalid language. Use 'english' or 'hausa'." if lang.lower() == "english" else "Harshen da ba daidai ba. Yi amfani da 'english' ko 'hausa'."
+        raise HTTPException(status_code=400, detail=error_msg)
+    result = clear_conversation(lang.lower())
     return result
+
+# Root endpoint for welcome message
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to the Hen Feces Chatbot API! Use POST /chat with an image, optional 'user_message', 'user_reply', and 'lang' ('english' or 'hausa'). Use POST /clear to reset conversation history.",
+        "hausa_message": "Barka da zuwa API na Chatbot na Kaza! Yi amfani da POST /chat tare da hoto, zaɓin 'user_message', 'user_reply', da 'lang' ('english' ko 'hausa'). Yi amfani da POST /clear don sake saita tarihin tattaunawa."
+    }
 
 # Run the app (for local testing)
 if __name__ == "__main__":
