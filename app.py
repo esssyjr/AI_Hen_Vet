@@ -3,10 +3,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import os
 import tempfile
-from google import generativeai
-import random
+import base64
 import io
+import logging
 from pydantic import BaseModel
+import openai
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(title="Hen Feces Chatbot API")
@@ -14,7 +23,7 @@ app = FastAPI(title="Hen Feces Chatbot API")
 # List of allowed frontend domains
 allowed_origins = [
     "http://localhost:3000",  # For local frontend testing
-    "https://your-frontend-domain.com",  # Replace with your actual frontend domain on Render
+    "https://your-frontend-domain.onrender.com",  # Replace with your actual frontend domain
 ]
 
 # Configure CORS
@@ -26,11 +35,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API keys for Google Generative AI
-API_KEYS = [
-    os.getenv("GOOGLE_API_KEY_1", "AIzaSyBvtwP2ulNHPQexfPhhR13U30pvF2OswrU"),
-    os.getenv("GOOGLE_API_KEY_2", "AIzaSyD0dLXPPrZmLbnHOj3f9twHmT_PZc15wMo"),
-]
+# API key for OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")  # Loaded from .env file
 
 # Store conversation history
 conversation_history = []
@@ -45,51 +51,63 @@ def chat_with_vet(user_message: str, user_reply: str, image: Image.Image, lang: 
     try:
         if not isinstance(image, Image.Image):
             error_msg = "Please upload a valid image of hen feces." if lang == "english" else "Da fatan za a loda hoton kaza mai inganci."
+            logger.error(error_msg)
             return {"error": error_msg}
 
-        # Save image
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
-            image.save(temp_file.name, format="JPEG")
-            image_path = temp_file.name
-
-        # Select API key
-        api_key = random.choice(API_KEYS)
-        if not api_key:
+        if not openai.api_key:
             error_msg = "No valid API key provided." if lang == "english" else "Ba a bayar da maɓallin API mai inganci ba."
+            logger.error(error_msg)
             return {"error": error_msg}
-        generativeai.configure(api_key=api_key)
 
-        # Upload image
-        uploaded_file = generativeai.upload_file(path=image_path, mime_type="image/jpeg")
+        # Convert image to base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-        # Create model
-        model = generativeai.GenerativeModel("gemini-1.5-flash")
+        # Build conversation history for OpenAI
+        messages = []
+        if user_message:
+            messages.append({"role": "user", "content": user_message})
+        if user_reply:
+            messages.append({"role": "user", "content": user_reply})
+        conversation_history_messages = [msg["parts"][0] for msg in conversation_history]
+        messages.extend([{"role": "assistant" if i % 2 == 1 else "user", "content": msg} for i, msg in enumerate(conversation_history_messages)])
 
-        # Build conversation sequence
-        prompt = (
+        # Construct prompt
+        prompt_text = (
             f"You are an intelligent veterinary chatbot specializing in poultry. An image of hen feces is uploaded. Analyze the image and user inputs to diagnose potential diseases and predict appropriate medications. "
             f"Provide brief, clear responses in a natural, conversational tone in {lang} ('english' or 'hausa'). If more information is needed, ask one concise, relevant follow-up question at a time, up to a maximum of three. Do not mention or list future questions. If sufficient information is gathered before three questions, provide a concise prediction listing only the likely disease(s) and specific medication(s) in {lang}. "
             "Note: Not all hens are layers."
         )
-        
-        # Update conversation
-        if user_message:
-            conversation_history.append({"role": "user", "parts": [user_message]})
-        if user_reply:
-            conversation_history.append({"role": "user", "parts": [user_reply]})
+        messages.insert(0, {"role": "system", "content": prompt_text})
 
-        # Add system prompt and image
-        input_sequence = [uploaded_file, prompt] + [msg["parts"][0] for msg in conversation_history]
+        # Add image to the last user message
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image of hen feces:"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{img_str}"
+                    },
+                },
+            ],
+        })
 
-        # Generate response
-        response = model.generate_content(input_sequence)
-        conversation_history.append({"role": "assistant", "parts": [response.text]})
-        os.unlink(image_path)
+        # Generate response using OpenAI
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=messages,
+        )
+        response_text = response.choices[0].message.content.strip()
 
-        return {"response": response.text}
+        conversation_history.append({"role": "assistant", "parts": [response_text]})
+        return {"response": response_text}
 
     except Exception as e:
         error_msg = f"Error: {str(e)}" if lang == "english" else f"Kuskure: {str(e)}"
+        logger.error(f"Exception in chat_with_vet: {str(e)}")
         return {"error": error_msg}
 
 def clear_conversation(lang: str):
@@ -114,7 +132,11 @@ async def chat_endpoint(
 
         # Read and validate image
         image_data = await image.read()
-        image = Image.open(io.BytesIO(image_data))
+        try:
+            image = Image.open(io.BytesIO(image_data))
+        except Exception as e:
+            error_msg = f"Error processing image: {str(e)}" if lang.lower() == "english" else f"Kuskure wajen sarrafa hoto: {str(e)}"
+            raise HTTPException(status_code=400, detail=error_msg)
         if image.format not in ["JPEG", "PNG"]:
             error_msg = "Only JPEG or PNG images are supported." if lang.lower() == "english" else "Hotunan JPEG ko PNG kawai ake tallafawa."
             raise HTTPException(status_code=400, detail=error_msg)
@@ -125,6 +147,7 @@ async def chat_endpoint(
 
     except Exception as e:
         error_msg = f"Error processing request: {str(e)}" if lang.lower() == "english" else f"Kuskure wajen sarrafa buƙata: {str(e)}"
+        logger.error(f"Exception in chat_endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=error_msg)
 
 # API endpoint for clearing conversation history
