@@ -3,3 +3,4 @@ uvicorn
 pillow
 google-generativeai
 python-multipart
+openai
