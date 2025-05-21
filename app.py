@@ -3,15 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import os
 import tempfile
-import base64
+from google import generativeai
+import random
 import io
 import logging
 from pydantic import BaseModel
-import openai
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,8 +31,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API key for OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")  # Loaded from .env file
+# API keys for Google Generative AI
+API_KEYS = [
+    os.getenv("GOOGLE_API_KEY_1", "AIzaSyBvtwP2ulNHPQexfPhhR13U30pvF2OswrU"),
+    os.getenv("GOOGLE_API_KEY_2", "AIzaSyD0dLXPPrZmLbnHOj3f9twHmT_PZc15wMo"),
+]
 
 # Store conversation history
 conversation_history = []
@@ -54,56 +53,47 @@ def chat_with_vet(user_message: str, user_reply: str, image: Image.Image, lang: 
             logger.error(error_msg)
             return {"error": error_msg}
 
-        if not openai.api_key:
+        # Save image
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+            image.save(temp_file.name, format="JPEG")
+            image_path = temp_file.name
+
+        # Select API key
+        api_key = random.choice(API_KEYS)
+        if not api_key:
             error_msg = "No valid API key provided." if lang == "english" else "Ba a bayar da maɓallin API mai inganci ba."
             logger.error(error_msg)
             return {"error": error_msg}
+        generativeai.configure(api_key=api_key)
 
-        # Convert image to base64
-        buffered = io.BytesIO()
-        image.save(buffered, format="JPEG")
-        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        # Upload image
+        uploaded_file = generativeai.upload_file(path=image_path, mime_type="image/jpeg")
 
-        # Build conversation history for OpenAI
-        messages = []
-        if user_message:
-            messages.append({"role": "user", "content": user_message})
-        if user_reply:
-            messages.append({"role": "user", "content": user_reply})
-        conversation_history_messages = [msg["parts"][0] for msg in conversation_history]
-        messages.extend([{"role": "assistant" if i % 2 == 1 else "user", "content": msg} for i, msg in enumerate(conversation_history_messages)])
+        # Create model
+        model = generativeai.GenerativeModel("gemini-1.5-flash")
 
-        # Construct prompt
-        prompt_text = (
+        # Build conversation sequence
+        prompt = (
             f"You are an intelligent veterinary chatbot specializing in poultry. An image of hen feces is uploaded. Analyze the image and user inputs to diagnose potential diseases and predict appropriate medications. "
             f"Provide brief, clear responses in a natural, conversational tone in {lang} ('english' or 'hausa'). If more information is needed, ask one concise, relevant follow-up question at a time, up to a maximum of three. Do not mention or list future questions. If sufficient information is gathered before three questions, provide a concise prediction listing only the likely disease(s) and specific medication(s) in {lang}. "
             "Note: Not all hens are layers."
         )
-        messages.insert(0, {"role": "system", "content": prompt_text})
+        
+        # Update conversation
+        if user_message:
+            conversation_history.append({"role": "user", "parts": [user_message]})
+        if user_reply:
+            conversation_history.append({"role": "user", "parts": [user_reply]})
 
-        # Add image to the last user message
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Analyze this image of hen feces:"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{img_str}"
-                    },
-                },
-            ],
-        })
+        # Add system prompt and image
+        input_sequence = [uploaded_file, prompt] + [msg["parts"][0] for msg in conversation_history]
 
-        # Generate response using OpenAI
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=messages,
-        )
-        response_text = response.choices[0].message.content.strip()
+        # Generate response
+        response = model.generate_content(input_sequence)
+        conversation_history.append({"role": "assistant", "parts": [response.text]})
+        os.unlink(image_path)
 
-        conversation_history.append({"role": "assistant", "parts": [response_text]})
-        return {"response": response_text}
+        return {"response": response.text}
 
     except Exception as e:
         error_msg = f"Error: {str(e)}" if lang == "english" else f"Kuskure: {str(e)}"
